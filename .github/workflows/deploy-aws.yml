@@ -62,8 +62,13 @@ jobs:
           role-session-name: kisan-nyay-github-deploy
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Set up AWS SAM CLI
-        uses: aws-actions/setup-sam@v2
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install AWS SAM CLI
+        run: pipx install aws-sam-cli
 
       - name: Validate and build SAM application
         working-directory: backend
