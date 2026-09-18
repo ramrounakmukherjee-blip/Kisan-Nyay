@@ -1,0 +1,9 @@
+version = 0.1
+[default.deploy.parameters]
+stack_name = "kisan-nyay-dev"
+resolve_s3 = true
+s3_prefix = "kisan-nyay-dev"
+region = "ap-south-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+parameter_overrides = "Environment=dev AllowedOrigin=https://YOUR_AMPLIFY_DOMAIN"

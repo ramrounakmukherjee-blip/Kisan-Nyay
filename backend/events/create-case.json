@@ -1,0 +1,1 @@
+{"requestContext":{"http":{"method":"POST","path":"/cases"},"authorizer":{"jwt":{"claims":{"sub":"demo-user-1","cognito:groups":"Farmers"}}}},"headers":{"content-type":"application/json","idempotency-key":"demo-create-001"},"body":"{\"crop\":\"Paddy\",\"incidentType\":\"flood\",\"fieldId\":\"F-01\",\"occurredAt\":\"2026-09-17T22:40:00+05:30\"}"}
