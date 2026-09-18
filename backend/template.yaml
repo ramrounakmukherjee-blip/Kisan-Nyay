@@ -1,0 +1,285 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Kisan Nyay serverless crop-loss evidence platform
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  AllowedOrigin:
+    Type: String
+    Default: http://localhost:5173
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Architectures: [arm64]
+    Timeout: 15
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref DataTable
+        EVIDENCE_BUCKET: !Ref EvidenceBucket
+        PROCESSING_QUEUE_URL: !Ref ProcessingQueue
+        POWERTOOLS_SERVICE_NAME: kisan-nyay-api
+        POWERTOOLS_LOG_LEVEL: INFO
+        ENVIRONMENT: !Ref Environment
+        ALLOWED_ORIGIN: !Ref AllowedOrigin
+    Tags:
+      Project: kisan-nyay
+      Environment: !Ref Environment
+
+Resources:
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: [!Ref AllowedOrigin]
+        AllowHeaders: [authorization, content-type, idempotency-key]
+        AllowMethods: [GET, POST, OPTIONS]
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+              audience: [!Ref UserPoolClient]
+            IdentitySource: $request.header.Authorization
+
+  CognitoSmsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cognito-idp.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Sub kisan-nyay-${AWS::AccountId}-${Environment}
+      Policies:
+        - PolicyName: PublishCognitoOtp
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: '*'
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub kisan-nyay-${Environment}
+      UserPoolTier: ESSENTIALS
+      UsernameAttributes: [phone_number]
+      AutoVerifiedAttributes: [phone_number]
+      MfaConfiguration: 'OFF'
+      SmsAuthenticationMessage: 'Your Kisan Nyay sign-in code is {####}'
+      SmsConfiguration:
+        ExternalId: !Sub kisan-nyay-${AWS::AccountId}-${Environment}
+        SnsCallerArn: !GetAtt CognitoSmsRole.Arn
+        SnsRegion: !Ref AWS::Region
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: false
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: false
+        SignInPolicy:
+          AllowedFirstAuthFactors: [SMS_OTP]
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationFunction.Arn
+      UserPoolTags:
+        Project: kisan-nyay
+        Environment: !Ref Environment
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: kisan-nyay-pwa
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      ExplicitAuthFlows: [ALLOW_USER_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+
+  FarmersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties: {GroupName: Farmers, Description: Self-registered farmer accounts, UserPoolId: !Ref UserPool}
+  ReviewersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties: {GroupName: Reviewers, Description: Administratively provisioned authorised reviewers, UserPoolId: !Ref UserPool}
+
+  PostConfirmationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/post_confirmation/
+      Handler: app.lambda_handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: cognito-idp:AdminAddUserToGroup
+              Resource: !Sub arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
+
+  PostConfirmationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt PostConfirmationFunction.Arn
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/api/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !Ref DataTable}
+        - S3CrudPolicy: {BucketName: !Ref EvidenceBucket}
+        - SQSSendMessagePolicy: {QueueName: !GetAtt ProcessingQueue.QueueName}
+      Events:
+        Health:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: /health, Method: GET, Auth: {Authorizer: NONE}}
+        Cases:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: /cases, Method: ANY}
+        Case:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: '/cases/{caseId}', Method: GET}
+        EvidenceUrl:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: '/cases/{caseId}/evidence-url', Method: POST}
+        EvidenceComplete:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: '/cases/{caseId}/evidence/{evidenceId}/complete', Method: POST}
+        SubmitCase:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: '/cases/{caseId}/submit', Method: POST}
+        Requests:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: '/cases/{caseId}/requests', Method: POST}
+        CompleteRequest:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: '/cases/{caseId}/requests/{requestId}/complete', Method: POST}
+
+  ProcessingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/processor/
+      Handler: app.lambda_handler
+      Timeout: 60
+      MemorySize: 512
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !Ref DataTable}
+        - S3ReadPolicy: {BucketName: !Ref EvidenceBucket}
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ProcessingQueue.Arn
+            BatchSize: 5
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  DataTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kisan-nyay-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: PK, AttributeType: S}
+        - {AttributeName: SK, AttributeType: S}
+        - {AttributeName: GSI1PK, AttributeType: S}
+        - {AttributeName: GSI1SK, AttributeType: S}
+        - {AttributeName: GSI2PK, AttributeType: S}
+        - {AttributeName: GSI2SK, AttributeType: S}
+      KeySchema:
+        - {AttributeName: PK, KeyType: HASH}
+        - {AttributeName: SK, KeyType: RANGE}
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - {AttributeName: GSI1PK, KeyType: HASH}
+            - {AttributeName: GSI1SK, KeyType: RANGE}
+          Projection: {ProjectionType: ALL}
+        - IndexName: GSI2
+          KeySchema:
+            - {AttributeName: GSI2PK, KeyType: HASH}
+            - {AttributeName: GSI2SK, KeyType: RANGE}
+          Projection: {ProjectionType: ALL}
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      SSESpecification: {SSEEnabled: true}
+
+  EvidenceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+      VersioningConfiguration: {Status: Enabled}
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload: {DaysAfterInitiation: 2}
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: [!Ref AllowedOrigin]
+            AllowedMethods: [PUT]
+            AllowedHeaders: ['*']
+            MaxAge: 300
+
+  ProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+  ProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ProcessingDLQ.Arn
+        maxReceiveCount: 4
+
+Outputs:
+  ApiUrl:
+    Description: HTTP API base URL
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}'
+  UserPoolId:
+    Description: Cognito user pool ID
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Public PWA app client ID
+    Value: !Ref UserPoolClient
+  EvidenceBucketName: {Value: !Ref EvidenceBucket}
+  TableName: {Value: !Ref DataTable}
+  ProcessingQueueUrl: {Value: !Ref ProcessingQueue}

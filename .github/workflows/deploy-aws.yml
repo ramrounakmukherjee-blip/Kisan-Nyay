@@ -1,0 +1,158 @@
+name: Deploy Kisan Nyay to AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment environment
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      allowed_origin:
+        description: Exact Amplify HTTPS origin, without a trailing slash
+        required: true
+        type: string
+      deploy_frontend:
+        description: Update Amplify environment and start a release
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: aws-deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  STACK_NAME: kisan-nyay-${{ inputs.environment }}
+
+jobs:
+  deploy:
+    name: Deploy serverless stack and PWA
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Check deployment configuration
+        env:
+          DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          AMPLIFY_APP: ${{ vars.AMPLIFY_APP_ID }}
+          AMPLIFY_BRANCH: ${{ vars.AMPLIFY_BRANCH }}
+        run: |
+          test -n "$DEPLOY_ROLE" || { echo "Repository variable AWS_DEPLOY_ROLE_ARN is required"; exit 1; }
+          if [[ "${{ inputs.deploy_frontend }}" == "true" ]]; then
+            test -n "$AMPLIFY_APP" || { echo "Repository variable AMPLIFY_APP_ID is required"; exit 1; }
+            test -n "$AMPLIFY_BRANCH" || { echo "Repository variable AMPLIFY_BRANCH is required"; exit 1; }
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: kisan-nyay-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install AWS SAM CLI
+        run: pipx install aws-sam-cli
+
+      - name: Validate and build SAM application
+        working-directory: backend
+        run: |
+          sam validate --lint
+          sam build
+
+      - name: Deploy SAM application
+        working-directory: backend
+        run: |
+          sam deploy \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Environment="${{ inputs.environment }}" \
+              AllowedOrigin="${{ inputs.allowed_origin }}"
+
+      - name: Read stack outputs
+        id: stack
+        run: |
+          outputs=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query 'Stacks[0].Outputs' \
+            --output json)
+          api_url=$(jq -r '.[] | select(.OutputKey=="ApiUrl") | .OutputValue' <<<"$outputs")
+          pool_id=$(jq -r '.[] | select(.OutputKey=="UserPoolId") | .OutputValue' <<<"$outputs")
+          client_id=$(jq -r '.[] | select(.OutputKey=="UserPoolClientId") | .OutputValue' <<<"$outputs")
+          test -n "$api_url" && test "$api_url" != null
+          test -n "$pool_id" && test "$pool_id" != null
+          test -n "$client_id" && test "$client_id" != null
+          echo "api_url=$api_url" >> "$GITHUB_OUTPUT"
+          echo "pool_id=$pool_id" >> "$GITHUB_OUTPUT"
+          echo "client_id=$client_id" >> "$GITHUB_OUTPUT"
+
+      - name: Configure Amplify build environment
+        if: ${{ inputs.deploy_frontend }}
+        env:
+          AMPLIFY_APP_ID: ${{ vars.AMPLIFY_APP_ID }}
+          API_URL: ${{ steps.stack.outputs.api_url }}
+          USER_POOL_ID: ${{ steps.stack.outputs.pool_id }}
+          USER_POOL_CLIENT_ID: ${{ steps.stack.outputs.client_id }}
+        run: |
+          current=$(aws amplify get-app \
+            --app-id "$AMPLIFY_APP_ID" \
+            --query 'app.environmentVariables' \
+            --output json)
+          updated=$(jq \
+            --arg api "$API_URL" \
+            --arg region "$AWS_REGION" \
+            --arg pool "$USER_POOL_ID" \
+            --arg client "$USER_POOL_CLIENT_ID" \
+            '. + {
+              VITE_AWS_API_URL: $api,
+              VITE_AWS_REGION: $region,
+              VITE_COGNITO_USER_POOL_ID: $pool,
+              VITE_COGNITO_CLIENT_ID: $client
+            }' <<<"${current:-{}}")
+          aws amplify update-app \
+            --app-id "$AMPLIFY_APP_ID" \
+            --environment-variables "$updated" \
+            >/dev/null
+
+      - name: Start Amplify release
+        if: ${{ inputs.deploy_frontend }}
+        env:
+          AMPLIFY_APP_ID: ${{ vars.AMPLIFY_APP_ID }}
+          AMPLIFY_BRANCH: ${{ vars.AMPLIFY_BRANCH }}
+        run: |
+          aws amplify start-job \
+            --app-id "$AMPLIFY_APP_ID" \
+            --branch-name "$AMPLIFY_BRANCH" \
+            --job-type RELEASE
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "## Kisan Nyay deployment"
+            echo "- Stack: \`$STACK_NAME\`"
+            echo "- Region: \`$AWS_REGION\`"
+            echo "- API: \`${{ steps.stack.outputs.api_url }}\`"
+            echo "- Cognito pool: \`${{ steps.stack.outputs.pool_id }}\`"
+            echo "- Amplify release requested: \`${{ inputs.deploy_frontend }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

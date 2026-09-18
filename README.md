@@ -1,4 +1,7 @@
-# 🛡️ AgriShield Starter Kit
+# 🛡️ AgriShield Starter Kit + Kisan Nyay
+
+> This branch includes **Kisan Nyay**, an offline-first crop-loss evidence application with an AWS SAM serverless backend. Start with [`frontend/README.md`](frontend/README.md), [`docs/AWS_ARCHITECTURE.md`](docs/AWS_ARCHITECTURE.md), and [`docs/AWS_DEPLOYMENT.md`](docs/AWS_DEPLOYMENT.md).
+
 
 A reusable **AgriTech / Full-Stack Agentic Development Framework** extracted from the award-winning **AgriShield 365** project by **Team RAVEN ROOTS**.
 

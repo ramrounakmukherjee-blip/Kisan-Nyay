@@ -1,0 +1,13 @@
+{
+  "name":"Kisan Nyay — Crop Evidence Network",
+  "short_name":"Kisan Nyay",
+  "description":"Offline-first crop-loss evidence assistant for Indian farmers.",
+  "start_url":"/",
+  "display":"standalone",
+  "background_color":"#f7f7f0",
+  "theme_color":"#173f34",
+  "lang":"hi",
+  "icons":[
+    {"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
+  ]
+}
