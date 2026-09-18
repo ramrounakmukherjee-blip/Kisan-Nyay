@@ -26,7 +26,22 @@ npm run lint
 npm run build
 ```
 
-## 1. Deploy the backend
+## Automated deployment with GitHub OIDC
+
+`.github/workflows/deploy-aws.yml` performs the remaining deployment without storing long-lived AWS access keys. One-time account authorization is still required:
+
+1. Configure GitHub as an IAM OIDC identity provider in the hackathon AWS account.
+2. Create a least-privilege deployment role whose trust policy permits this repository and the protected GitHub environment (`dev`, `staging`, or `prod`).
+3. Create the Amplify Hosting app and connect its branch using `amplify.yml`.
+4. Add these **repository or environment variables**, not secrets copied into source:
+   - `AWS_DEPLOY_ROLE_ARN` — ARN of the OIDC deployment role
+   - `AMPLIFY_APP_ID` — target Amplify app ID
+   - `AMPLIFY_BRANCH` — connected branch name
+5. In GitHub Actions, run **Deploy Kisan Nyay to AWS**, select the environment, and enter the exact Amplify HTTPS origin.
+
+The workflow obtains short-lived credentials, validates/builds SAM, deploys CloudFormation, reads stack outputs, updates all four Amplify `VITE_*` variables, and starts an Amplify release. GitHub environment approval rules should protect staging and production.
+
+## 1. Deploy the backend manually
 
 Use the real Amplify origin for `AllowedOrigin`; do not leave a production stack configured for localhost.
 
